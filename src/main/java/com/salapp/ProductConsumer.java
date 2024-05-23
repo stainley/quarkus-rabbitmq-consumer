@@ -5,8 +5,11 @@ import io.smallrye.reactive.messaging.rabbitmq.IncomingRabbitMQMetadata;
 import io.vertx.core.json.JsonObject;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.json.Json;
+import jakarta.ws.rs.sse.SseBroadcaster;
 import org.eclipse.microprofile.reactive.messaging.Incoming;
 import org.eclipse.microprofile.reactive.messaging.Message;
+import org.jboss.resteasy.reactive.server.jaxrs.OutboundSseEventImpl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -20,6 +23,7 @@ public class ProductConsumer {
     private static final Logger log = LoggerFactory.getLogger(ProductConsumer.class);
 
     private final OrderService orderService;
+    private SseBroadcaster broadcaster;
 
     @Inject
     public ProductConsumer(OrderService orderService) {
@@ -31,12 +35,15 @@ public class ProductConsumer {
         log.info("Received message with payload: {}", messageIncoming.getPayload());
 
         messageIncoming.getMetadata(IncomingRabbitMQMetadata.class).ifPresentOrElse(
-                this::logMetadata,
-                () -> log.warn("No metadata found in message")
+                this::logMetadata, () -> log.warn("No metadata found in message")
         );
 
+        // Notify changes
         return extractOrder(messageIncoming.getPayload())
-                .thenCompose(this::saveOrder)
+                .thenCompose(order -> {
+                    emitOrder(order);
+                    return saveOrder(order);
+                })
                 .exceptionally(ex -> {
                     log.error("Error processing message", ex);
                     return null;
@@ -76,6 +83,33 @@ public class ProductConsumer {
                 throw new RuntimeException(e);
             }
         });
+    }
+
+    private void emitOrder(Order order) {
+
+        log.info("Will emitting Order: {}", order);
+
+        if (broadcaster != null) {
+            jakarta.json.JsonObject jsonOrder = Json.createObjectBuilder()
+                    .add("orderId", order.orderId())
+                    .add("customerId", order.customerId())
+                    .add("productId", order.productId())
+                    .add("quantity", order.quantity())
+                    .build();
+
+            log.info("JSON order: {}", jsonOrder);
+
+            OutboundSseEventImpl event = new OutboundSseEventImpl.BuilderImpl()
+                    .data(jsonOrder)
+                    .build();
+            broadcaster.broadcast(event);
+        } else {
+            log.warn("Broadcaster not set");
+        }
+    }
+
+    public void registerBroadcaster(SseBroadcaster broadcaster) {
+        this.broadcaster = broadcaster;
     }
 
     public record Order(int orderId, int customerId, int productId, int quantity) {
